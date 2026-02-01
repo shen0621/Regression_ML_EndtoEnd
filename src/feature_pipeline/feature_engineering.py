@@ -7,65 +7,15 @@ Feature engineering: date parts, frequency encoding, target encoding, drop leaka
 - ALSO saves fitted encoders for inference
 """
 
-from pathlib import Path
 import pandas as pd
-from category_encoders import TargetEncoder
-from joblib import dump #joblib.dump saves encoders/mappings to disk (important for reusing at inference).
+import numpy as np
+from scipy.stats import skew
 
-PROCESSED_DIR = Path("data/processed")
-MODELS_DIR = Path("models")
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
+PROCESSED_DIR = Path("../data/processed/")
 
 
 # ---------- feature functions ----------
 
-def add_date_features(df: pd.DataFrame) -> pd.DataFrame:
-    df["date"] = pd.to_datetime(df["date"])
-    df["year"] = df["date"].dt.year
-    df["quarter"] = df["date"].dt.quarter
-    df["month"] = df["date"].dt.month
-    # place after date for readability (optional)
-    df.insert(1, "year", df.pop("year"))
-    df.insert(2, "quarter", df.pop("quarter"))
-    df.insert(3, "month", df.pop("month"))
-    return df
-
-
-#Creates a frequency encoding (how often a value appears).
-#Fit only on train, then applied to eval.
-def frequency_encode(train: pd.DataFrame, eval: pd.DataFrame, col: str):
-    freq_map = train[col].value_counts()
-    train[f"{col}_freq"] = train[col].map(freq_map)
-    eval[f"{col}_freq"] = eval[col].map(freq_map).fillna(0)
-    return train, eval, freq_map
-
-
-#Uses target encoding (replace category with average of target variable).
-#Fitted only on train (prevents leakage).
-def target_encode(train: pd.DataFrame, eval: pd.DataFrame, col: str, target: str):
-    """
-    Use TargetEncoder on `col`, consistently name as <col>_encoded.
-    For city_full → city_full_encoded (keeps schema aligned with inference).
-    """
-    te = TargetEncoder(cols=[col])
-    encoded_col = f"{col}_encoded" if col != "city_full" else "city_full_encoded"
-    train[encoded_col] = te.fit_transform(train[col], train[target])
-    eval[encoded_col] = te.transform(eval[col])
-    return train, eval, te
-
-
-
-def drop_unused_columns(train: pd.DataFrame, eval: pd.DataFrame):
-    drop_cols = ["date", "city_full", "city", "zipcode", "median_sale_price"]
-    train = train.drop(columns=[c for c in drop_cols if c in train.columns], errors="ignore")
-    eval = eval.drop(columns=[c for c in drop_cols if c in eval.columns], errors="ignore")
-    return train, eval
-
-
-# ---------- pipeline ----------
-
-#Handles full pipeline: 
-#reads cleaned CSVs → applies feature engineering → saves engineered data + encoders.
 def run_feature_engineering(
     in_train_path: Path | str | None = None,
     in_eval_path: Path | str | None = None,
@@ -91,33 +41,78 @@ def run_feature_engineering(
     eval_df = pd.read_csv(in_eval_path)
     holdout_df = pd.read_csv(in_holdout_path)
 
-    print("Train date range:", train_df["date"].min(), "to", train_df["date"].max())
-    print("Eval date range:", eval_df["date"].min(), "to", eval_df["date"].max())
-    print("Holdout date range:", holdout_df["date"].min(), "to", holdout_df["date"].max())
 
-    # Date features
-    train_df = add_date_features(train_df)
-    eval_df = add_date_features(eval_df)
-    holdout_df = add_date_features(holdout_df)
+    train_df = train_df.drop(train_df[train_df['LotFrontage']>150].index)
+    train_df['LotFrontage']=train_df['LotFrontage'].fillna(train_df['LotFrontage'].mean())
+    train_df = train_df.drop(train_df[train_df['LotArea']>50001].index)
 
-    # Frequency encode zipcode (fit on train only)
-    freq_map = None
-    if "zipcode" in train_df.columns:
-        train_df, eval_df, freq_map = frequency_encode(train_df, eval_df, "zipcode")
-        holdout_df["zipcode_freq"] = holdout_df["zipcode"].map(freq_map).fillna(0)
-        dump(freq_map, MODELS_DIR / "freq_encoder.pkl")   # save mapping
+    all_data = pd.concat([train_df, eval_df, holdout_df], ignore_index=True)
 
-    # Target encode city_full (fit on train only)
-    target_encoder = None
-    if "city_full" in train_df.columns:
-        train_df, eval_df, target_encoder = target_encode(train_df, eval_df, "city_full", "price")
-        holdout_df["city_full_encoded"] = target_encoder.transform(holdout_df["city_full"])
-        dump(target_encoder, MODELS_DIR / "target_encoder.pkl")  # save encoder
+    print("\nall_data",all_data.shape)
+    numeric_feats = all_data.dtypes[all_data.dtypes != "object"].index
+    categorical_features = pd.DataFrame(all_data.describe(include = ['O'])).columns
 
-    # Drop leakage / raw categoricals
-    train_df, eval_df = drop_unused_columns(train_df, eval_df)
-    holdout_df, _ = drop_unused_columns(holdout_df.copy(), holdout_df.copy())
+    prices = pd.DataFrame({"price":train_df["SalePrice"], "log(price + 1)":np.log1p(train_df["SalePrice"])})
+    train_df["SalePrice"] = np.log1p(train_df["SalePrice"])
 
+
+    #missing data
+    REMOVING_THRESH = 0.8
+
+    total = all_data.isnull().sum().sort_values(ascending=False)
+    percent = (all_data.isnull().sum()/all_data.isnull().count()).sort_values(ascending=False)
+    missing_data = pd.concat([total, percent], axis=1, keys=['Total', 'Percent'])
+    print(missing_data.head(10))
+
+    all_data = all_data.drop((missing_data[missing_data['Percent'] > REMOVING_THRESH]).index,1)
+
+
+    all_data['LotArea']=np.log1p(all_data['LotArea'])
+
+    all_data["TotBsmtFin"] = all_data["BsmtFinSF1"] + all_data["BsmtFinSF2"]
+
+    all_data = all_data.drop("BsmtFinSF1",1)
+    all_data = all_data.drop("BsmtFinSF2",1)
+
+    all_data["TotBath"] = all_data["FullBath"] + 0.5*all_data["HalfBath"] + all_data["BsmtFullBath"] + 0.5*all_data["BsmtHalfBath"]
+
+    all_data = all_data.drop("FullBath",1)
+    all_data = all_data.drop("HalfBath",1)
+    all_data = all_data.drop("BsmtFullBath",1)
+    all_data = all_data.drop("BsmtHalfBath",1)
+
+
+    all_data["TotArea"] = all_data["GrLivArea"] + all_data["TotalBsmtSF"]
+
+    numeric_feats = all_data.dtypes[all_data.dtypes != "object"].index
+    skewed_feats = all_data[numeric_feats].apply(lambda x: skew(x.dropna())) #compute skewness
+
+    skewed_feats = skewed_feats[skewed_feats > 0.1]
+    skewed_feats = skewed_feats.index
+
+    all_data[skewed_feats] = np.log1p(all_data[skewed_feats])
+
+    all_data = all_data.drop("BsmtFinType1",1)
+    all_data = all_data.drop("2ndFlrSF",1)
+    all_data = all_data.drop("BedroomAbvGr",1)
+
+    all_data = all_data.drop("LowQualFinSF",1)
+    all_data = all_data.drop("3SsnPorch",1)
+    all_data = all_data.drop('Condition2',1)
+
+    dummies = pd.get_dummies(all_data)
+    all_data = pd.get_dummies(all_data)
+    all_data = all_data.fillna(all_data.median())
+    print("all_data dim: ",all_data.shape)
+
+    train_df = all_data.iloc[:len(train_df)]
+    print(train_df.shape)
+    eval_df = all_data.iloc[len(train_df):(len(train_df)+len(eval_df))]
+    print(eval_df.shape)
+    holdout_df = all_data.iloc[len(train_df)+len(eval_df):]
+    print(holdout_df.shape)
+
+    
     # Save engineered data
     out_train_path = output_dir / "feature_engineered_train.csv"
     out_eval_path = output_dir / "feature_engineered_eval.csv"
@@ -130,9 +125,8 @@ def run_feature_engineering(
     print("   Train shape:", train_df.shape)
     print("   Eval  shape:", eval_df.shape)
     print("   Holdout shape:", holdout_df.shape)
-    print("   Encoders saved to models/")
 
-    return train_df, eval_df, holdout_df, freq_map, target_encoder
+    return train_df, eval_df, holdout_df
 
 
 if __name__ == "__main__":

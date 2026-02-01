@@ -6,30 +6,27 @@ Load & time-split the raw dataset.
 """
 
 import pandas as pd
+import numpy as np
 from pathlib import Path
 
-DATA_DIR = Path("data/raw")
+DATA_DIR = Path("../data/raw/")
 
 
 def load_and_split_data(
-    raw_path: str = "data/raw/untouched_raw_original.csv",
+    raw_path: str = "/Users/yaoshen/Documents/ML/Dataset/house_price/train.csv",
     output_dir: Path | str = DATA_DIR,
 ):
     """Load raw dataset, split into train/eval/holdout by date, and save to output_dir."""
     df = pd.read_csv(raw_path)
+    print(df.shape)
+    df.head(4)
 
-    # Ensure datetime + sort
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.sort_values("date")
+    train_df, eval_df, holdout_df = np.split(df.sample(frac=1, random_state=42), 
+                                   [int(.5 * len(df)), int(.75 * len(df))])
 
-    # Cutoffs
-    cutoff_date_eval = pd.Timestamp("2020-01-01")     # eval starts
-    cutoff_date_holdout = pd.Timestamp("2022-01-01")  # holdout starts
-
-    # Splits
-    train_df = df[df["date"] < cutoff_date_eval]
-    eval_df = df[(df["date"] >= cutoff_date_eval) & (df["date"] < cutoff_date_holdout)]
-    holdout_df = df[df["date"] >= cutoff_date_holdout]
+    print(f"Part 1 (50%): {len(train_df)} rows")
+    print(f"Part 2 (25%): {len(eval_df)} rows")
+    print(f"Part 3 (25%): {len(holdout_df)} rows")
 
     # Save
     outdir = Path(output_dir)

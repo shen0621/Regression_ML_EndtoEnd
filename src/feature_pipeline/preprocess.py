@@ -20,132 +20,90 @@ Preprocessing: city normalization + (optional) lat/lng merge, duplicate drop, ou
 import re
 from pathlib import Path
 import pandas as pd
+import numpy as np
 
-RAW_DIR = Path("data/raw")
-PROCESSED_DIR = Path("data/processed")
+RAW_DIR = Path("../data/raw/")
+PROCESSED_DIR = Path("../data/processed/")
 PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-
-# Manual fixes for known mismatches (normalized form)
-CITY_MAPPING = {
-    "las vegas-henderson-paradise": "las vegas-henderson-north las vegas",
-    "denver-aurora-lakewood": "denver-aurora-centennial",
-    "houston-the woodlands-sugar land": "houston-pasadena-the woodlands",
-    "austin-round rock-georgetown": "austin-round rock-san marcos",
-    "miami-fort lauderdale-pompano beach": "miami-fort lauderdale-west palm beach",
-    "san francisco-oakland-berkeley": "san francisco-oakland-fremont",
-    "dc_metro": "washington-arlington-alexandria",
-    "atlanta-sandy springs-alpharetta": "atlanta-sandy springs-roswell",
-}
-
-
-def normalize_city(s: str) -> str:
-    """Lowercase, strip, unify dashes. Safe for NA."""
-    if pd.isna(s):
-        return s
-    s = str(s).strip().lower()
-    s = re.sub(r"[–—-]", "-", s)          # unify dashes
-    s = re.sub(r"\s+", " ", s)            # collapse spaces
-    return s
-
-
-def clean_and_merge(df: pd.DataFrame, metros_path: str | None = "data/raw/usmetros.csv") -> pd.DataFrame:
-    """
-    Normalize city names, optionally merge lat/lng from metros dataset.
-    If `city_full` column or `metros_path` is missing, skip gracefully.
-    """
-
-    if "city_full" not in df.columns:
-        print("⚠️ Skipping city merge: no 'city_full' column present.")
-        return df
-
-    # Normalize city_full
-    df["city_full"] = df["city_full"].apply(normalize_city)
-    # Apply mapping
-    norm_mapping = {normalize_city(k): normalize_city(v) for k, v in CITY_MAPPING.items()}
-    df["city_full"] = df["city_full"].replace(norm_mapping)
-
-    # 🚨 If lat/lng already present, skip merge
-    if {"lat", "lng"}.issubset(df.columns):
-        print("⚠️ Skipping lat/lng merge: already present in DataFrame.")
-        return df
-
-    # If no metros file provided / exists, skip merge
-    if not metros_path or not Path(metros_path).exists():
-        print("⚠️ Skipping lat/lng merge: metros file not provided or not found.")
-        return df
-
-    # Merge lat/lng
-    metros = pd.read_csv(metros_path)
-    if "metro_full" not in metros.columns or not {"lat", "lng"}.issubset(metros.columns):
-        print("⚠️ Skipping lat/lng merge: metros file missing required columns.")
-        return df
-
-    metros["metro_full"] = metros["metro_full"].apply(normalize_city)
-    df = df.merge(metros[["metro_full", "lat", "lng"]],
-                  how="left", left_on="city_full", right_on="metro_full")
-    df.drop(columns=["metro_full"], inplace=True, errors="ignore")
-
-    missing = df[df["lat"].isnull()]["city_full"].unique()
-    if len(missing) > 0:
-        print("⚠️ Still missing lat/lng for:", missing)
-    else:
-        print("✅ All cities matched with metros dataset.")
-    return df
-
-
-
-def drop_duplicates(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop exact duplicates while keeping different dates/years."""
-    before = df.shape[0]
-    df = df.drop_duplicates(subset=df.columns.difference(["date", "year"]), keep=False)
-    after = df.shape[0]
-    print(f"✅ Dropped {before - after} duplicate rows (excluding date/year).")
-    return df
-
-
-def remove_outliers(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove extreme outliers in median_list_price (> 19M)."""
-    if "median_list_price" not in df.columns:
-        return df
-    before = df.shape[0]
-    df = df[df["median_list_price"] <= 19_000_000].copy()
-    after = df.shape[0]
-    print(f"✅ Removed {before - after} rows with median_list_price > 19M.")
-    return df
-
-
-def preprocess_split(
-    split: str,
-    raw_dir: Path | str = RAW_DIR,
-    processed_dir: Path | str = PROCESSED_DIR,
-    metros_path: str | None = "data/raw/usmetros.csv",
-) -> pd.DataFrame:
-    """Run preprocessing for a split and save to processed_dir."""
-    raw_dir = Path(raw_dir)
-    processed_dir = Path(processed_dir)
-    processed_dir.mkdir(parents=True, exist_ok=True)
-
-    path = raw_dir / f"{split}.csv"
-    df = pd.read_csv(path)
-
-    df = clean_and_merge(df, metros_path=metros_path)
-    df = drop_duplicates(df)
-    df = remove_outliers(df)
-
-    out_path = processed_dir / f"cleaning_{split}.csv"
-    df.to_csv(out_path, index=False)
-    print(f"✅ Preprocessed {split} saved to {out_path} ({df.shape})")
-    return df
 
 
 def run_preprocess(
-    splits: tuple[str, ...] = ("train", "eval", "holdout"),
     raw_dir: Path | str = RAW_DIR,
-    processed_dir: Path | str = PROCESSED_DIR,
-    metros_path: str | None = "data/raw/usmetros.csv",
-):
-    for s in splits:
-        preprocess_split(s, raw_dir=raw_dir, processed_dir=processed_dir, metros_path=metros_path)
+    processed_dir: Path | str = PROCESSED_DIR):
+    
+    train_df = pd.read_csv(RAW_DIR/"train.csv")
+    eval_df = pd.read_csv(RAW_DIR/"eval.csv")
+    holdout_df = pd.read_csv(RAW_DIR/"holdout.csv")
+
+    data = pd.concat([train_df, eval_df, holdout_df], ignore_index=True)
+    # save all categorical columns in list
+    categorical_columns = [col for col in data.columns.values if data[col].dtype == 'object']
+
+    # dataframe with categorical features
+    data_cat = data[categorical_columns]
+    # dataframe with numerical features
+    data_num = data.drop(categorical_columns, axis=1)
+
+    ## skewness
+    from scipy.stats import skew
+    data_num_skew = data_num.apply(lambda x: skew(x.dropna()))
+    data_num_skew = data_num_skew[data_num_skew > .75]
+
+    # apply log + 1 transformation for all numeric features with skewnes over .75
+    data_num[data_num_skew.index] = np.log1p(data_num[data_num_skew.index])
+
+
+    ## missing values
+    data_len = data_num.shape[0]
+
+    # check what is percentage of missing values in categorical dataframe
+    for col in data_num.columns.values:
+        missing_values = data_num[col].isnull().sum()
+        #print("{} - missing values: {} ({:0.2f}%)".format(col, missing_values, missing_values/data_len*100)) 
+
+        # drop column if there is more than 50 missing values
+        if missing_values > 50:
+            #print("droping column: {}".format(col))
+            data_num = data_num.drop(col, axis = 1)
+        # if there is less than 50 missing values than fill in with median valu of column
+        else:
+            #print("filling missing values with median in column: {}".format(col))
+            data_num = data_num.fillna(data_num[col].median())
+
+        data_len = data_cat.shape[0]
+
+
+    # check what is percentage of missing values in categorical dataframe
+    for col in data_cat.columns.values:
+        missing_values = data_cat[col].isnull().sum()
+        #print("{} - missing values: {} ({:0.2f}%)".format(col, missing_values, missing_values/data_len*100)) 
+
+        # drop column if there is more than 50 missing values
+        if missing_values > 50:
+            print("droping column: {}".format(col))
+            data_cat.drop(col, axis = 1)
+        # if there is less than 50 missing values than fill in with median valu of column
+        else:
+            #print("filling missing values with XXX: {}".format(col))
+            #data_cat = data_cat.fillna('XXX')
+            pass
+
+
+    data = pd.concat([data_num, data_cat], axis=1)
+    train_df = data.iloc[:len(train_df)]
+    print(train_df.shape)
+    eval_df = data.iloc[len(train_df):(len(train_df)+len(eval_df))]
+    print(eval_df.shape)
+    holdout_df = data.iloc[len(train_df)+len(eval_df):]
+    print(holdout_df.shape)
+
+    # Save splits
+    train_df.to_csv(PROCESSED_DIR/"cleaning_train.csv", index=False)
+    eval_df.to_csv(PROCESSED_DIR/"cleaning_eval.csv", index=False)
+    holdout_df.to_csv(PROCESSED_DIR/"cleaning_holdout.csv", index=False)
+
+    print(f"✅ Preprocessed saved to {out_path}")
+
 
 
 if __name__ == "__main__":
