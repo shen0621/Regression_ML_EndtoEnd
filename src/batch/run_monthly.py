@@ -20,21 +20,20 @@ OUTPUT_DIR = Path("data/predictions")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def run_monthly_predictions():
+def run_style_predictions():
     # Load holdout
     df = pd.read_csv(HOLDOUT_PATH)
-    df["date"] = pd.to_datetime(df["date"])
 
     # Group by year + month
-    grouped = df.groupby([df["date"].dt.year, df["date"].dt.month])
+    grouped = df.groupby(["BldgType", "HouseStyle"])
 
     all_outputs = []
-    for (year, month), group in grouped:
-        print(f"📅 Running predictions for {year}-{month:02d} ({len(group)} rows)")
+    for (BldgType, HouseStyle), group in grouped:
+        print(f" Running predictions:")
 
         preds_df = predict(group)
 
-        out_path = OUTPUT_DIR / f"preds_{year}_{month:02d}.csv"
+        out_path = OUTPUT_DIR / f"preds_{BldgType}_{HouseStyle}.csv"
         preds_df.to_csv(out_path, index=False)
         print(f"✅ Saved predictions to {out_path}")
 
@@ -44,6 +43,6 @@ def run_monthly_predictions():
 
 
 if __name__ == "__main__":
-    all_preds = run_monthly_predictions()
+    all_preds = run_style_predictions()
     print("🎉 Batch inference complete.")
     print(all_preds.head())

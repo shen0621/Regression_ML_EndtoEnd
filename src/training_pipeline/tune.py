@@ -45,7 +45,7 @@ def _load_data(
     train_df = _maybe_sample(train_df, sample_frac, random_state)
     eval_df = _maybe_sample(eval_df, sample_frac, random_state)
 
-    target = "price"
+    target = "SalePrice"
     X_train, y_train = train_df.drop(columns=[target]), train_df[target]
     X_eval, y_eval = eval_df.drop(columns=[target]), eval_df[target]
     return X_train, y_train, X_eval, y_eval

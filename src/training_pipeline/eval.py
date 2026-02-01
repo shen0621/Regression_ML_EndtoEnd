@@ -33,7 +33,7 @@ def evaluate_model(
     eval_df = pd.read_csv(eval_path)
     eval_df = _maybe_sample(eval_df, sample_frac, random_state)
 
-    target = "price"
+    target = "SalePrice"
     X_eval, y_eval = eval_df.drop(columns=[target]), eval_df[target]
 
     model = load(model_path)
